@@ -235,6 +235,69 @@ impl From<LockError> for CanaryError {
     }
 }
 
+/// An error returned when a report's digest or target protocol does not match
+/// the pinned values in a project's `.stellar-canary.lock` file.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "lockfile mismatch for field '{field}': lockfile expected '{expected}', report found '{found}'"
+)]
+pub struct LockMismatchError {
+    pub field: String,
+    pub expected: String,
+    pub found: String,
+}
+
+impl From<LockMismatchError> for CanaryError {
+    fn from(error: LockMismatchError) -> Self {
+        CanaryError::Configuration(error.to_string())
+    }
+}
+
+/// Compares a report's `packDigest` and `targetProtocol` against a loaded [`LockFile`].
+///
+/// Returns `Ok(())` if both match the lockfile's `[fixtures]` section.
+/// On mismatch, returns a [`LockMismatchError`] naming the mismatched field and both values.
+///
+/// Note: The call site will pass the report's `packDigest` once #442 adds it to the report structure.
+pub fn validate_report_against_lock(
+    lock: &LockFile,
+    pack_digest: &str,
+    target_protocol: u32,
+) -> Result<(), LockMismatchError> {
+    if lock.fixtures.pack_digest != pack_digest {
+        return Err(LockMismatchError {
+            field: "packDigest".to_string(),
+            expected: lock.fixtures.pack_digest.clone(),
+            found: pack_digest.to_string(),
+        });
+    }
+    if lock.fixtures.protocol != target_protocol {
+        return Err(LockMismatchError {
+            field: "protocol".to_string(),
+            expected: lock.fixtures.protocol.to_string(),
+            found: target_protocol.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Loads `.stellar-canary.lock` at `path` using [`load_lock`] and verifies that
+/// a report's `pack_digest` and `target_protocol` match the lockfile's contents.
+///
+/// On any mismatch or lockfile read/parse failure, returns a [`CanaryError`] which
+/// maps to CLI exit code 2 ([`ExitCode::ConfigurationError`](canary_core::ExitCode::ConfigurationError)).
+///
+/// Note: The call site will pass the report's `packDigest` once #442 adds it to the report structure.
+pub fn validate_stored_report_against_lock(
+    path: &Path,
+    pack_digest: &str,
+    target_protocol: u32,
+) -> Result<(), CanaryError> {
+    let lock = load_lock(path)?;
+    validate_report_against_lock(&lock, pack_digest, target_protocol)?;
+    Ok(())
+}
+
 /// Reads and validates the lockfile at `path` (CF-03 sections 2 and 3).
 ///
 /// Rejected before any parsing: a symbolic link, anything that is not a
