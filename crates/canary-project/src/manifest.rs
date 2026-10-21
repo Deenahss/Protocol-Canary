@@ -137,10 +137,10 @@ pub fn parse_cargo_dependencies(raw: &str) -> Option<Vec<ManifestDep>> {
     Some(deps)
 }
 
-/// Reads and parses `<root>/package.json`, if present.
-pub fn read_package_json(root: &Path) -> Option<ProjectManifest> {
-    let raw = std::fs::read_to_string(root.join("package.json")).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+/// Parses `package.json` text into the dependency names it declares, or
+/// `None` when it is not valid JSON.
+pub fn parse_package_json(raw: &str) -> Option<ProjectManifest> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
 
     let mut dependency_names = Vec::new();
     for section in ["dependencies", "devDependencies", "peerDependencies"] {
@@ -152,6 +152,38 @@ pub fn read_package_json(root: &Path) -> Option<ProjectManifest> {
     dependency_names.dedup();
 
     Some(ProjectManifest { dependency_names })
+}
+
+/// Reads and parses `<root>/package.json`, if present.
+pub fn read_package_json(root: &Path) -> Option<ProjectManifest> {
+    let raw = std::fs::read_to_string(root.join("package.json")).ok()?;
+    parse_package_json(&raw)
+}
+
+/// Parses `package.json` text into workspace globs if `workspaces` is declared.
+///
+/// Supports array syntax (`"workspaces": ["packages/*"]`) and object syntax
+/// (`"workspaces": { "packages": ["packages/*"] }`).
+pub fn parse_npm_workspace_globs(raw: &str) -> Option<Vec<String>> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let ws = value.get("workspaces")?;
+    if let Some(arr) = ws.as_array() {
+        let patterns: Vec<String> = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        return Some(patterns);
+    }
+    if let Some(obj) = ws.as_object() {
+        if let Some(arr) = obj.get("packages").and_then(|v| v.as_array()) {
+            let patterns: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            return Some(patterns);
+        }
+    }
+    None
 }
 
 /// Parses `package.json` text into declared dependencies with their section names.

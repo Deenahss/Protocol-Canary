@@ -207,6 +207,28 @@ pub fn extract_archive_with_limits<R: Read>(
         }
     }
 
+    let result = perform_extraction(reader, dest, limits);
+    if result.is_err() {
+        // Safe failure behavior: clean up any partially extracted output in dest
+        if let Ok(entries) = std::fs::read_dir(dest) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    let _ = std::fs::remove_dir_all(&p);
+                } else {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
+    }
+    result
+}
+
+fn perform_extraction<R: Read>(
+    reader: R,
+    dest: &Path,
+    limits: &ArchiveLimits,
+) -> Result<ExtractionSummary, ArchiveSafetyError> {
     let gz = GzDecoder::new(reader);
     let mut archive = Archive::new(gz);
 

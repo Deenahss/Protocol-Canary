@@ -12,7 +12,7 @@ use crate::manifest::{
     parse_cargo_dependencies, parse_cargo_manifest, parse_go_mod_dependencies,
     parse_package_json_dependencies, read_package_json, ProjectManifest,
 };
-use crate::workspace::scan_cargo_workspace;
+use crate::workspace::{scan_cargo_workspace, scan_npm_workspace};
 
 pub use crate::capabilities::GO_STELLAR_SDK_DEPENDENCY;
 
@@ -122,7 +122,7 @@ pub fn detect_details(root: &Path) -> DetailedDetection {
     workspace_members.sort();
     workspace_members.dedup();
 
-    // 3. package.json
+    // 3. package.json & npm workspaces
     let root_pkg = root.join("package.json");
     if let Ok(raw) = std::fs::read_to_string(&root_pkg) {
         inspected.push("package.json".to_string());
@@ -141,6 +141,31 @@ pub fn detect_details(root: &Path) -> DetailedDetection {
             }
         }
     }
+
+    let npm_workspace_scan = scan_npm_workspace(root);
+    diagnostics.extend(npm_workspace_scan.diagnostics);
+    for member in &npm_workspace_scan.members {
+        workspace_members.push(member.path.clone());
+        let member_rel = format!("{}/package.json", member.path);
+        let member_path = root.join(&member_rel);
+        if let Ok(raw) = std::fs::read_to_string(&member_path) {
+            inspected.push(member_rel.clone());
+            if let Some(deps) = parse_package_json_dependencies(&raw) {
+                for dep in deps {
+                    record_dep_evidence(
+                        &dep.name,
+                        &dep.section,
+                        &member_rel,
+                        "npm",
+                        &mut all_evidence,
+                    );
+                }
+            }
+        }
+        manifests.push(member.manifest.clone());
+    }
+    workspace_members.sort();
+    workspace_members.dedup();
 
     // 4. go.mod
     let root_go = root.join("go.mod");

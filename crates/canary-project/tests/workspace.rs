@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use canary_core::{Capability, ProjectType};
 use canary_project::{
-    detect, scan_cargo_workspace, DiagnosticCode, MAX_WORKSPACE_DEPTH, MAX_WORKSPACE_MEMBERS,
+    detect, scan_cargo_workspace, scan_npm_workspace, DiagnosticCode, MAX_WORKSPACE_DEPTH,
+    MAX_WORKSPACE_MEMBERS,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -352,4 +353,179 @@ fn results_are_stable_across_runs() {
         scan_cargo_workspace(dir.path()),
         scan_cargo_workspace(dir.path())
     );
+}
+
+#[test]
+fn npm_array_workspaces_discovered() {
+    let dir = Scratch::new("npm-array");
+    dir.write(
+        "package.json",
+        r#"{
+            "name": "root",
+            "workspaces": ["packages/*", "apps/*"]
+        }"#,
+    );
+    dir.write(
+        "packages/sdk-pkg/package.json",
+        r#"{
+            "name": "sdk-pkg",
+            "dependencies": {
+                "@stellar/stellar-sdk": "^12.0.0"
+            }
+        }"#,
+    );
+    dir.write(
+        "apps/web/package.json",
+        r#"{
+            "name": "web",
+            "devDependencies": {
+                "typescript": "^5.0.0"
+            }
+        }"#,
+    );
+
+    let scan = scan_npm_workspace(dir.path());
+    assert_eq!(member_paths(&scan), ["apps/web", "packages/sdk-pkg"]);
+    assert!(scan.has_dependency("@stellar/stellar-sdk"));
+    assert!(scan.has_dependency("typescript"));
+
+    let ctx = detect(dir.path());
+    assert_eq!(ctx.project_type, ProjectType::RpcConsumer);
+    assert!(ctx.capabilities.contains(&Capability::StellarSdkDependency));
+    assert!(ctx.capabilities.contains(&Capability::RpcClient));
+}
+
+#[test]
+fn npm_object_workspaces_discovered() {
+    let dir = Scratch::new("npm-object");
+    dir.write(
+        "package.json",
+        r#"{
+            "name": "root",
+            "workspaces": {
+                "packages": ["packages/*"]
+            }
+        }"#,
+    );
+    dir.write(
+        "packages/a/package.json",
+        r#"{
+            "name": "a",
+            "devDependencies": {
+                "@stellar/stellar-sdk": "12.0.0"
+            }
+        }"#,
+    );
+
+    let scan = scan_npm_workspace(dir.path());
+    assert_eq!(member_paths(&scan), ["packages/a"]);
+    assert!(scan.has_dependency("@stellar/stellar-sdk"));
+
+    let ctx = detect(dir.path());
+    assert_eq!(ctx.project_type, ProjectType::RpcConsumer);
+}
+
+#[test]
+fn npm_workspace_negative_case_no_sdk() {
+    let dir = Scratch::new("npm-no-sdk");
+    dir.write(
+        "package.json",
+        r#"{
+            "name": "root",
+            "workspaces": ["packages/*"]
+        }"#,
+    );
+    dir.write(
+        "packages/a/package.json",
+        r#"{
+            "name": "a",
+            "dependencies": {
+                "lodash": "^4.0.0"
+            }
+        }"#,
+    );
+
+    let scan = scan_npm_workspace(dir.path());
+    assert_eq!(member_paths(&scan), ["packages/a"]);
+    assert!(!scan.has_dependency("@stellar/stellar-sdk"));
+
+    let ctx = detect(dir.path());
+    assert_eq!(ctx.project_type, ProjectType::Unknown);
+}
+
+#[test]
+fn npm_workspace_malformed_and_missing_package_json() {
+    let dir = Scratch::new("npm-bad");
+    dir.write(
+        "package.json",
+        r#"{
+            "name": "root",
+            "workspaces": ["packages/*"]
+        }"#,
+    );
+    dir.write("packages/bad/package.json", "{ not valid json");
+    std::fs::create_dir_all(dir.path().join("packages/empty")).unwrap();
+
+    let scan = scan_npm_workspace(dir.path());
+    assert!(scan.members.is_empty());
+    assert!(scan.diagnostics.iter().any(|d| d.code == DiagnosticCode::ManifestUnparseable));
+    assert!(scan.diagnostics.iter().any(|d| d.code == DiagnosticCode::WorkspaceMemberMissing));
+}
+
+#[test]
+fn npm_workspace_limits_and_duplicates() {
+    let dir = Scratch::new("npm-limits");
+    let mut patterns = Vec::new();
+    for i in 0..MAX_WORKSPACE_MEMBERS + 10 {
+        patterns.push(format!("packages/p{i:03}"));
+    }
+    // Include duplicates in patterns
+    patterns.push("packages/p000".to_string());
+
+    let patterns_json = serde_json::to_string(&patterns).unwrap();
+    dir.write(
+        "package.json",
+        &format!(r#"{{"name": "root", "workspaces": {patterns_json}}}"#),
+    );
+
+    for i in 0..MAX_WORKSPACE_MEMBERS + 10 {
+        dir.write(
+            &format!("packages/p{i:03}/package.json"),
+            r#"{"name": "pkg"}"#,
+        );
+    }
+
+    let scan = scan_npm_workspace(dir.path());
+    assert_eq!(scan.members.len(), MAX_WORKSPACE_MEMBERS);
+    assert!(scan.diagnostics.iter().any(|d| d.code == DiagnosticCode::ScanBoundReached));
+}
+
+#[cfg(unix)]
+#[test]
+fn npm_workspace_circular_symlink_in_node_modules_terminated() {
+    let dir = Scratch::new("npm-symlink-loop");
+    dir.write(
+        "package.json",
+        r#"{
+            "name": "root",
+            "workspaces": ["packages/*"]
+        }"#,
+    );
+    dir.write(
+        "packages/pkg-a/package.json",
+        r#"{
+            "name": "pkg-a",
+            "dependencies": {
+                "@stellar/stellar-sdk": "12.0.0"
+            }
+        }"#,
+    );
+
+    let nm_dir = dir.path().join("packages/pkg-a/node_modules");
+    std::fs::create_dir_all(&nm_dir).unwrap();
+    std::os::unix::fs::symlink(&nm_dir, nm_dir.join("self-loop")).unwrap();
+
+    let scan = scan_npm_workspace(dir.path());
+    assert_eq!(member_paths(&scan), ["packages/pkg-a"]);
+    assert!(scan.has_dependency("@stellar/stellar-sdk"));
 }
