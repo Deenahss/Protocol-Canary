@@ -423,6 +423,45 @@ fn negative_path_with_backslash() {
 }
 
 #[test]
+fn negative_path_with_triple_dot_segment() {
+    let sandbox = TestSandbox::new("triple-dot-segment");
+    let archive = ArchiveFixtureBuilder::new()
+        .file("dir/.../file.txt", b"triple dot segment")
+        .build();
+
+    let result = extract_archive(archive.as_slice(), &sandbox.dest);
+    match result {
+        Err(ArchiveSafetyError::InvalidPath { reason, .. }) => {
+            assert!(reason.contains("'...' segment"));
+        }
+        other => panic!("Expected InvalidPath for '...' segment, got {other:?}"),
+    }
+    sandbox.assert_nothing_written_outside();
+}
+
+#[test]
+fn exact_limits_succeed() {
+    let sandbox = TestSandbox::new("exact-limits");
+    let limits = ArchiveLimits {
+        max_entries: 2,
+        max_total_bytes: 20,
+        max_file_bytes: 10,
+        max_path_depth: 2,
+    };
+
+    let archive = ArchiveFixtureBuilder::new()
+        .file("dir1/file1.txt", b"1234567890")
+        .file("dir2/file2.txt", b"1234567890")
+        .build();
+
+    let summary = extract_archive_with_limits(archive.as_slice(), &sandbox.dest, &limits)
+        .expect("exact limits should succeed");
+    assert_eq!(summary.entries_extracted, 2);
+    assert_eq!(summary.total_bytes, 20);
+    sandbox.assert_nothing_written_outside();
+}
+
+#[test]
 fn negative_path_with_nul_byte() {
     let sandbox = TestSandbox::new("nul-byte");
     let archive = ArchiveFixtureBuilder::new()

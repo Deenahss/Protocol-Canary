@@ -221,7 +221,7 @@ pub fn extract_archive_with_limits<R: Read>(
     for entry in entries {
         let mut entry = entry.map_err(map_io_error)?;
 
-        entry_count += 1;
+        entry_count = entry_count.saturating_add(1);
         if entry_count > limits.max_entries {
             return Err(ArchiveSafetyError::EntryLimitExceeded {
                 count: entry_count,
@@ -301,6 +301,12 @@ pub fn extract_archive_with_limits<R: Read>(
                 return Err(ArchiveSafetyError::InvalidPath {
                     path: path_str.to_string(),
                     reason: "contains a '.' segment",
+                });
+            }
+            if *segment == "..." {
+                return Err(ArchiveSafetyError::InvalidPath {
+                    path: path_str.to_string(),
+                    reason: "contains a '...' segment",
                 });
             }
             if segment.is_empty() {
@@ -424,7 +430,7 @@ pub fn extract_archive_with_limits<R: Read>(
                 Ok(n) => n,
                 Err(e) => return Err(map_io_error(e)),
             };
-            file_bytes += n as u64;
+            file_bytes = file_bytes.saturating_add(n as u64);
             if file_bytes > limits.max_file_bytes {
                 return Err(ArchiveSafetyError::FileSizeLimitExceeded {
                     path: path_str.to_string(),
@@ -432,7 +438,7 @@ pub fn extract_archive_with_limits<R: Read>(
                     limit: limits.max_file_bytes,
                 });
             }
-            total_uncompressed_bytes += n as u64;
+            total_uncompressed_bytes = total_uncompressed_bytes.saturating_add(n as u64);
             if total_uncompressed_bytes > limits.max_total_bytes {
                 return Err(ArchiveSafetyError::TotalSizeLimitExceeded {
                     bytes: total_uncompressed_bytes,
