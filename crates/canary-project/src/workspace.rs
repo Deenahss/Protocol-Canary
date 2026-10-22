@@ -56,6 +56,7 @@ pub enum DiagnosticCode {
     UnsupportedSyntax,
     WorkspaceMemberMissing,
     PathOutsideRoot,
+    OverrideNotice,
 }
 
 impl DiagnosticCode {
@@ -69,6 +70,7 @@ impl DiagnosticCode {
             DiagnosticCode::UnsupportedSyntax => "unsupported-syntax",
             DiagnosticCode::WorkspaceMemberMissing => "workspace-member-missing",
             DiagnosticCode::PathOutsideRoot => "path-outside-root",
+            DiagnosticCode::OverrideNotice => "override-notice",
         }
     }
 }
