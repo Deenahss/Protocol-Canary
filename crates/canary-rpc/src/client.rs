@@ -41,11 +41,12 @@ use crate::models::{
 ///   at which point `attempts` holds how many attempts were made.
 /// - **Protocol-level** ([`RpcError::InvalidJson`],
 ///   [`RpcError::JsonRpcError`], [`RpcError::MethodNotAvailable`],
-///   [`RpcError::InvalidResponse`]): the
+///   [`RpcError::InvalidResponse`], [`RpcError::ResponseTooLarge`]): the
 ///   endpoint answered, but the answer is unusable — not JSON, a JSON-RPC
-///   `error` object, or a `result` that does not deserialize into the
-///   expected type. These are deterministic, so retrying them would never
-///   help and they are returned on the first attempt.
+///   `error` object, a `result` that does not deserialize into the
+///   expected type, or a body larger than [`MAX_RESPONSE_BYTES`]. These are
+///   deterministic, so retrying them would never help and they are returned
+///   on the first attempt.
 /// - **Semantic** ([`RpcError::NetworkMismatch`],
 ///   [`RpcError::ProtocolMismatch`]): the endpoint answered correctly but
 ///   reports a different network passphrase or protocol version than the run
@@ -187,6 +188,19 @@ pub enum RpcError {
     /// how many attempts were made before giving up.
     #[error("RPC endpoint rate-limited {method} after {attempts} attempt(s)")]
     RateLimited { method: String, attempts: u32 },
+
+    /// The response body is larger than [`MAX_RESPONSE_BYTES`].
+    ///
+    /// Raised before the body is buffered — from the declared
+    /// `Content-Length` when the endpoint sends one, otherwise as soon as
+    /// the streamed body passes the cap — and the connection is dropped at
+    /// that point rather than read to completion, so a runaway or
+    /// malicious endpoint cannot exhaust this process's memory (D-06).
+    ///
+    /// Deterministic for the same response, so it is not retried. `limit`
+    /// echoes the cap that was exceeded, in bytes, for the diagnostic.
+    #[error("response body from {method} exceeds the {limit}-byte size cap and was not read")]
+    ResponseTooLarge { method: String, limit: usize },
 }
 
 impl From<RpcError> for CanaryError {
@@ -235,6 +249,17 @@ pub fn validate_network_info(
     }
     Ok(())
 }
+
+/// Hard cap on the number of bytes read from one RPC response body
+/// (16 MiB, approved under D-06).
+///
+/// It is far above the largest response the project has observed (a
+/// Mainnet `getLatestLedger` with its `metadataXdr` is about 1.3 MB) and
+/// far below anything that would exhaust memory, so it only ever rejects
+/// a runaway or hostile endpoint. Exceeding it is
+/// [`RpcError::ResponseTooLarge`], never a truncated or partially parsed
+/// body.
+pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 /// The subset of Stellar RPC this project depends on.
 pub trait RpcClient {
@@ -732,10 +757,7 @@ impl HttpRpcClient {
             });
         }
 
-        let text = response.text().await.map_err(|e| RpcError::Transport {
-            method: method.to_string(),
-            message: e.to_string(),
-        })?;
+        let text = read_body_capped(response, method).await?;
 
         let envelope: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| RpcError::InvalidJson {
@@ -780,6 +802,50 @@ impl HttpRpcClient {
             reason: e.to_string(),
         })
     }
+}
+
+/// Reads a response body while enforcing [`MAX_RESPONSE_BYTES`].
+///
+/// The declared `Content-Length` is checked first, so a response that
+/// announces an oversized body is refused without reading any of it. When
+/// there is no length (a chunked or connection-closed body) the stream is
+/// read incrementally and abandoned as soon as the running total would
+/// pass the cap, so an oversized body is never fully buffered even though
+/// its length was unknown in advance. Dropping the response at that point
+/// closes the connection.
+///
+/// Bytes are decoded lossily rather than strictly, matching what the
+/// previous `Response::text()` call did: an invalid UTF-8 body is handed to
+/// the JSON parser, which reports it as [`RpcError::InvalidJson`], instead
+/// of being reported as a transport failure.
+async fn read_body_capped(
+    mut response: reqwest::Response,
+    method: &str,
+) -> Result<String, RpcError> {
+    if let Some(declared) = response.content_length() {
+        if declared > MAX_RESPONSE_BYTES as u64 {
+            return Err(RpcError::ResponseTooLarge {
+                method: method.to_string(),
+                limit: MAX_RESPONSE_BYTES,
+            });
+        }
+    }
+
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| RpcError::Transport {
+        method: method.to_string(),
+        message: e.to_string(),
+    })? {
+        if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            return Err(RpcError::ResponseTooLarge {
+                method: method.to_string(),
+                limit: MAX_RESPONSE_BYTES,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 /// JSON-RPC standard error code for "Method not found".
