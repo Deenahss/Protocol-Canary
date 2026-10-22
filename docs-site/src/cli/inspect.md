@@ -17,7 +17,7 @@ Options:
       --json                         Shorthand for --format json
       --verbose                      Include verbose diagnostic details in output
   -h, --help                         Print help
-``�
+```
 
 ## What it inspects
 

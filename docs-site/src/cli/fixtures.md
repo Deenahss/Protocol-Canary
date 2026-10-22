@@ -16,12 +16,12 @@ Options:
       --json                         Shorthand for --format json
       --surface <SURFACE>            Filter fixtures by compatibility surface [possible values: xdr, rpc, soroban]
       --category <CATEGORY>          Filter fixtures by category
-   -h, --help                         Print help
-``�
+  -h, --help                         Print help
+```
 
 This loads and validates `--fixtures-dir` exactly the way `check` does
 (so a malformed fixture is reported the same way, exit code `4`), but
-stops before running anything — no network call, regardless of th
+stops before running anything — no network call, regardless of the
 fixtures' surfaces.
 
 As with `check`, a `--fixtures-dir` that does not exist is treated as zero
@@ -57,7 +57,7 @@ Soroban
 ```
 
 Fixtures are grouped by surface and listed in sorted-path order, matching
-acheck`'s deterministic ordering. Use this to confirm which fixtures a
+`check`'s deterministic ordering. Use this to confirm which fixtures a
 `--fixtures-dir`/`--protocol` combination will actually run before
 spending a live network call on `check` — see [Fixtures](../fixtures-guide.md)
 for what a fixture is and how this list maps to the file layout.
