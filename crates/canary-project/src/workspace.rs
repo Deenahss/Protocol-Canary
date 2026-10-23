@@ -52,7 +52,6 @@ pub enum DiagnosticCode {
     ManifestUnparseable,
     ManifestTooLarge,
     ScanBoundReached,
-    ScanBoundHit,
     SymlinkSkipped,
     UnsupportedSyntax,
     WorkspaceMemberMissing,
@@ -67,7 +66,6 @@ impl DiagnosticCode {
             DiagnosticCode::ManifestUnparseable => "manifest-unparseable",
             DiagnosticCode::ManifestTooLarge => "manifest-too-large",
             DiagnosticCode::ScanBoundReached => "scan-bound-reached",
-            DiagnosticCode::ScanBoundHit => "scan-bound-hit",
             DiagnosticCode::SymlinkSkipped => "symlink-skipped",
             DiagnosticCode::UnsupportedSyntax => "unsupported-syntax",
             DiagnosticCode::WorkspaceMemberMissing => "workspace-member-missing",
@@ -173,7 +171,7 @@ pub fn scan_cargo_workspace(root: &Path) -> WorkspaceScan {
     }
     if total > MAX_WORKSPACE_MEMBERS {
         scan.diagnostics.push(Diagnostic {
-            code: DiagnosticCode::ScanBoundHit,
+            code: DiagnosticCode::ScanBoundReached,
             detail: format!(
                 "workspace members limit {MAX_WORKSPACE_MEMBERS} ({total} found); the rest were not scanned"
             ),
@@ -283,7 +281,7 @@ pub(crate) fn scan_pnpm_workspace_with_limit(root: &Path, member_limit: usize) -
     }
     if total > member_limit {
         scan.diagnostics.push(Diagnostic {
-            code: DiagnosticCode::ScanBoundHit,
+            code: DiagnosticCode::ScanBoundReached,
             detail: format!(
                 "workspace members limit {member_limit} ({total} found); the rest were not scanned"
             ),
@@ -382,7 +380,7 @@ pub(crate) fn scan_npm_workspace_with_limit(root: &Path, member_limit: usize) ->
     }
     if total > member_limit {
         scan.diagnostics.push(Diagnostic {
-            code: DiagnosticCode::ScanBoundHit,
+            code: DiagnosticCode::ScanBoundReached,
             detail: format!(
                 "workspace members limit {member_limit} ({total} found); the rest were not scanned"
             ),
@@ -404,7 +402,7 @@ impl Budget {
         if over && !self.reported {
             self.reported = true;
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::ScanBoundHit,
+                code: DiagnosticCode::ScanBoundReached,
                 detail: format!(
                     "directories visited limit {MAX_DIRECTORIES_VISITED} or entries read limit {MAX_ENTRIES_READ}"
                 ),
@@ -521,7 +519,7 @@ fn expand_pattern(
     if segments.len() > MAX_WORKSPACE_DEPTH {
         push(
             diagnostics,
-            DiagnosticCode::ScanBoundHit,
+            DiagnosticCode::ScanBoundReached,
             format!(
                 "workspace member pattern {pattern:?} is deeper than {MAX_WORKSPACE_DEPTH} levels"
             ),
