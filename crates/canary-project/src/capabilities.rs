@@ -3,9 +3,15 @@
 use canary_core::Capability;
 
 use crate::manifest::ProjectManifest;
+use crate::models::{CapabilityEvidence, CapabilityModel};
+
+pub use crate::models::{CapabilityEvidence as ModelEvidence, CapabilityModel as Model};
 
 /// Dependency names that indicate a Soroban contract project.
 pub const SOROBAN_DEPENDENCIES: &[&str] = &["soroban-sdk"];
+
+/// The verified Go SDK module path (CF-07 section 4).
+pub const GO_STELLAR_SDK_DEPENDENCY: &str = "github.com/stellar/go-stellar-sdk";
 
 /// Dependency names that indicate direct use of official Stellar SDK/XDR
 /// crates without necessarily being a Soroban contract.
@@ -16,6 +22,7 @@ pub const STELLAR_SDK_DEPENDENCIES: &[&str] = &[
     "stellar-strkey",
     "@stellar/stellar-sdk",
     "@stellar/stellar-base",
+    GO_STELLAR_SDK_DEPENDENCY,
 ];
 
 /// Dependency names that indicate the project talks to Stellar RPC.
@@ -61,6 +68,77 @@ pub fn detect_capabilities(signals: &DetectionSignals) -> Vec<Capability> {
     }
 
     capabilities
+}
+
+/// Derives the declared [`CapabilityModel`] values with populated evidence records from raw signals.
+pub fn detect_capabilities_models(signals: &DetectionSignals) -> Vec<CapabilityModel> {
+    let mut models: Vec<CapabilityModel> = Vec::new();
+
+    for manifest in &signals.manifests {
+        for dep in &manifest.dependency_names {
+            if SOROBAN_DEPENDENCIES.contains(&dep.as_str()) {
+                add_evidence_record(
+                    &mut models,
+                    Capability::SorobanContract,
+                    CapabilityEvidence::new(
+                        "manifest",
+                        dep,
+                        "soroban-sdk dependency declared in project manifest",
+                    ),
+                );
+            }
+            if STELLAR_SDK_DEPENDENCIES.contains(&dep.as_str()) {
+                add_evidence_record(
+                    &mut models,
+                    Capability::StellarSdkDependency,
+                    CapabilityEvidence::new(
+                        "manifest",
+                        dep,
+                        "stellar SDK dependency declared in project manifest",
+                    ),
+                );
+            }
+            if RPC_CLIENT_DEPENDENCIES.contains(&dep.as_str()) {
+                add_evidence_record(
+                    &mut models,
+                    Capability::RpcClient,
+                    CapabilityEvidence::new(
+                        "manifest",
+                        dep,
+                        "stellar RPC client dependency declared in project manifest",
+                    ),
+                );
+            }
+        }
+    }
+
+    if signals.has_wasm_artifact {
+        add_evidence_record(
+            &mut models,
+            Capability::WasmArtifact,
+            CapabilityEvidence::new(
+                "artifact",
+                "*.wasm",
+                "compiled Soroban WASM artifact found in build output",
+            ),
+        );
+    }
+
+    models
+}
+
+fn add_evidence_record(
+    models: &mut Vec<CapabilityModel>,
+    capability: Capability,
+    evidence: CapabilityEvidence,
+) {
+    if let Some(existing) = models.iter_mut().find(|m| m.capability == capability) {
+        if !existing.evidence.contains(&evidence) {
+            existing.evidence.push(evidence);
+        }
+    } else {
+        models.push(CapabilityModel::new(capability, vec![evidence]));
+    }
 }
 
 #[cfg(test)]
@@ -128,5 +206,17 @@ mod tests {
             detect_capabilities(&signals),
             vec![Capability::WasmArtifact]
         );
+    }
+
+    #[test]
+    fn go_stellar_sdk_dependency_yields_stellar_sdk_capability() {
+        let signals = DetectionSignals {
+            manifests: vec![ProjectManifest {
+                dependency_names: vec![GO_STELLAR_SDK_DEPENDENCY.to_string()],
+            }],
+            ..Default::default()
+        };
+        let caps = detect_capabilities(&signals);
+        assert_eq!(caps, vec![Capability::StellarSdkDependency]);
     }
 }
