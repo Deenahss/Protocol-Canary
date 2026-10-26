@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use canary_core::{Capability, ProjectType};
 use canary_project::{
-    detect, scan_cargo_workspace, DiagnosticCode, MAX_WORKSPACE_DEPTH, MAX_WORKSPACE_MEMBERS,
+    detect, detect_details, scan_cargo_workspace, scan_npm_workspace, scan_pnpm_workspace,
+    DiagnosticCode, MAX_WORKSPACE_DEPTH, MAX_WORKSPACE_MEMBERS,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -352,4 +353,153 @@ fn results_are_stable_across_runs() {
         scan_cargo_workspace(dir.path()),
         scan_cargo_workspace(dir.path())
     );
+}
+
+#[test]
+fn pnpm_workspaces_detect_members_and_apply_exclusion_patterns() {
+    let dir = Scratch::new("pnpm-members");
+    dir.write(
+        "pnpm-workspace.yaml",
+        "packages:\n  - 'packages/*' # include package directories\n  - '!packages/ignored' # exclude generated package\n",
+    );
+    dir.write(
+        "packages/sdk/package.json",
+        r#"{"dependencies":{"@stellar/stellar-sdk":"^13"}}"#,
+    );
+    dir.write(
+        "packages/ignored/package.json",
+        r#"{"dependencies":{"soroban-sdk":"1"}}"#,
+    );
+
+    let scan = scan_pnpm_workspace(dir.path());
+    assert_eq!(member_paths(&scan), ["packages/sdk"]);
+    assert!(scan.has_dependency("@stellar/stellar-sdk"));
+    assert!(!scan.has_dependency("soroban-sdk"));
+    assert!(scan.diagnostics.is_empty(), "{:?}", scan.diagnostics);
+
+    let detection = detect_details(dir.path());
+    assert_eq!(detection.context.project_type, ProjectType::RpcConsumer);
+    assert_eq!(detection.workspace_members, ["packages/sdk"]);
+    assert!(detection
+        .inspected
+        .contains(&"pnpm-workspace.yaml".to_string()));
+    assert!(detection
+        .inspected
+        .contains(&"packages/sdk/package.json".to_string()));
+}
+
+#[test]
+fn malformed_pnpm_workspace_reports_diagnostic_and_keeps_root_detection() {
+    let dir = Scratch::new("pnpm-malformed");
+    dir.write("pnpm-workspace.yaml", "packages: [\n  - 'broken'\n");
+    dir.write(
+        "package.json",
+        r#"{"dependencies":{"@stellar/stellar-sdk":"^13"}}"#,
+    );
+
+    let detection = detect_details(dir.path());
+    assert_eq!(detection.context.project_type, ProjectType::RpcConsumer);
+    assert!(detection.workspace_members.is_empty());
+    assert!(detection.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == DiagnosticCode::ManifestUnparseable
+            && diagnostic.detail.contains("pnpm-workspace.yaml")
+    }));
+}
+
+#[test]
+fn npm_workspaces_discover_array_and_object_members() {
+    for (name, workspaces) in [
+        ("npm-array", r#"["packages/*"]"#),
+        ("npm-object", r#"{"packages":["packages/*"]}"#),
+    ] {
+        let dir = Scratch::new(name);
+        dir.write("package.json", &format!(r#"{{"workspaces":{workspaces}}}"#));
+        dir.write(
+            "packages/sdk/package.json",
+            r#"{"dependencies":{"@stellar/stellar-sdk":"^13"}}"#,
+        );
+        dir.write(
+            "packages/tool/package.json",
+            r#"{"devDependencies":{"stellar-sdk":"^12"}}"#,
+        );
+
+        let scan = scan_npm_workspace(dir.path());
+        assert_eq!(member_paths(&scan), ["packages/sdk", "packages/tool"]);
+        assert!(scan.has_dependency("@stellar/stellar-sdk"));
+        assert!(scan.has_dependency("stellar-sdk"));
+        assert!(scan.diagnostics.is_empty(), "{:?}", scan.diagnostics);
+    }
+}
+
+#[test]
+fn npm_member_dependencies_produce_member_evidence() {
+    let dir = Scratch::new("npm-evidence");
+    dir.write("package.json", r#"{"workspaces":["packages/*"]}"#);
+    dir.write(
+        "packages/app/package.json",
+        r#"{"devDependencies":{"@stellar/stellar-sdk":"^13"}}"#,
+    );
+
+    let detection = detect_details(dir.path());
+    assert_eq!(detection.context.project_type, ProjectType::RpcConsumer);
+    assert_eq!(detection.workspace_members, ["packages/app"]);
+    assert!(detection
+        .inspected
+        .contains(&"packages/app/package.json".to_string()));
+    let evidence = detection
+        .capability_evidence
+        .iter()
+        .find(|entry| entry.capability == Capability::StellarSdkDependency)
+        .unwrap();
+    assert!(evidence.evidence.iter().any(|entry| {
+        entry.manifest == "packages/app/package.json"
+            && entry.ecosystem == "npm"
+            && entry.dependency.as_deref() == Some("@stellar/stellar-sdk")
+            && entry.section.as_deref() == Some("devDependencies")
+    }));
+}
+
+#[test]
+fn cargo_and_npm_members_share_the_64_member_detection_limit() {
+    let dir = Scratch::new("combined-workspace-limit");
+    dir.workspace(&["rust/*"]);
+    dir.write("package.json", r#"{"workspaces":["javascript/*"]}"#);
+    for index in 0..40 {
+        dir.member(&format!("rust/c{index:03}"), &[]);
+        dir.write(&format!("javascript/p{index:03}/package.json"), "{}");
+    }
+
+    let detection = detect_details(dir.path());
+    assert_eq!(detection.workspace_members.len(), MAX_WORKSPACE_MEMBERS);
+    assert_eq!(
+        detection
+            .workspace_members
+            .iter()
+            .filter(|path| path.starts_with("javascript/"))
+            .count(),
+        24
+    );
+    assert!(detection
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == DiagnosticCode::ScanBoundReached));
+}
+
+#[cfg(unix)]
+#[test]
+fn npm_scan_ignores_circular_symlinks_inside_node_modules() {
+    let dir = Scratch::new("npm-node-modules-loop");
+    dir.write("package.json", r#"{"workspaces":["packages/*"]}"#);
+    dir.write(
+        "packages/app/package.json",
+        r#"{"dependencies":{"@stellar/stellar-sdk":"1"}}"#,
+    );
+    let node_modules = dir.path().join("packages/app/node_modules");
+    std::fs::create_dir_all(&node_modules).unwrap();
+    std::os::unix::fs::symlink(&node_modules, node_modules.join("loop")).unwrap();
+
+    let scan = scan_npm_workspace(dir.path());
+    assert_eq!(member_paths(&scan), ["packages/app"]);
+    assert!(scan.has_dependency("@stellar/stellar-sdk"));
+    assert!(scan.diagnostics.is_empty(), "{:?}", scan.diagnostics);
 }

@@ -4,6 +4,7 @@ pub mod capabilities;
 pub mod detector;
 pub mod fingerprint;
 pub mod manifest;
+pub mod models;
 pub mod workspace;
 
 pub use capabilities::{
@@ -11,20 +12,25 @@ pub use capabilities::{
     SOROBAN_DEPENDENCIES, STELLAR_SDK_DEPENDENCIES,
 };
 pub use detector::{
-    detect, detect_details, find_wasm_artifacts, resolve_project_type, CapabilityEvidence,
-    DetailedDetection, DetectionEvidence,
+    detect, detect_details, detect_project, find_wasm_artifacts, resolve_project_type,
+    CapabilityEvidence, DetailedDetection, DetectionEvidence,
 };
 pub use fingerprint::{
     compute_fingerprint, ProjectFingerprint, DETECTOR_REVISION, FINGERPRINT_VERSION,
 };
 pub use manifest::{
     parse_cargo_dependencies, parse_go_manifest, parse_go_mod, parse_go_mod_dependencies,
-    parse_package_json_dependencies, read_cargo_manifest, read_go_mod, read_package_json,
-    GoModError, ManifestDep, ProjectManifest,
+    parse_package_json_dependencies, parse_pyproject_dependencies, parse_pyproject_manifest,
+    parse_requirements_dependencies, parse_requirements_line, parse_requirements_manifest,
+    parse_requirements_txt, read_cargo_manifest, read_go_mod, read_package_json,
+    read_pyproject_manifest, read_pyproject_toml, read_requirements_manifest,
+    read_requirements_txt, GoModError, ManifestDep, ProjectManifest,
 };
+pub use models::{CapabilityEvidence as ModelCapabilityEvidence, CapabilityModel};
 pub use workspace::{
-    scan_cargo_workspace, Diagnostic, DiagnosticCode, WorkspaceMember, WorkspaceScan,
-    MAX_WORKSPACE_DEPTH, MAX_WORKSPACE_MEMBERS,
+    scan_cargo_workspace, scan_npm_workspace, scan_pnpm_workspace, Diagnostic, DiagnosticCode,
+    WorkspaceMember, WorkspaceScan, MAX_DIRECTORIES_VISITED, MAX_WORKSPACE_DEPTH,
+    MAX_WORKSPACE_MEMBERS,
 };
 
 /// Test-only temp-directory helper shared by this crate's unit tests, so no

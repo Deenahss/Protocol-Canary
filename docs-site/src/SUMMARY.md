@@ -1,5 +1,7 @@
 # Summary
 
+[Report Viewer](./viewer/index.html)
+
 [Protocol Canary](./index.md)
 
 - [What Problem Does It Solve?](./problem.md)
@@ -13,6 +15,10 @@
   - [inspect](./cli/inspect.md)
   - [fixtures](./cli/fixtures.md)
   - [report](./cli/report.md)
+  - [diff](./cli/diff.md)
+  - [lock](./cli/lock.md)
+  - [config](./cli/config.md)
+  - [completions](./cli/completions.md)
   - [version](./cli/version.md)
 - [Exit Codes](./exit-codes.md)
 - [Protocol 28](./protocol-28.md)

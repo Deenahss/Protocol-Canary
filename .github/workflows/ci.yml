@@ -88,6 +88,13 @@ jobs:
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
+    # rustsec/audit-check publishes its report as a check run whenever it has
+    # anything to report (including an informational warning such as an
+    # unmaintained dependency), which needs `checks: write`. Granted to this
+    # job only; the workflow default stays read-only.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v7
 
@@ -101,4 +108,18 @@ jobs:
         uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  viewer:
+    name: viewer tests (node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Run the viewer suites
+        run: >
+          node --test
+          viewer/test/viewer.test.mjs
+          viewer/test/security.test.mjs
+          viewer/test/a11y.test.mjs
+          viewer/test/publish.test.mjs
 

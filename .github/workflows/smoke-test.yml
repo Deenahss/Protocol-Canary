@@ -1,0 +1,105 @@
+name: Release smoke test
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to smoke-test (defaults to the latest release)
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    name: smoke-test (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: stellar-canary-x86_64-unknown-linux-gnu.tar.gz
+            binary: stellar-canary
+            archive_ext: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: stellar-canary-aarch64-apple-darwin.tar.gz
+            binary: stellar-canary
+            archive_ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: stellar-canary-x86_64-pc-windows-msvc.zip
+            binary: stellar-canary.exe
+            archive_ext: zip
+    steps:
+      - name: Resolve the release tag
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-$EVENT_TAG}"
+          if [ -z "$tag" ]; then
+            tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Download the published archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "${{ matrix.archive }}" \
+            --dir dist
+
+      - name: Unpack the archive
+        shell: bash
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd dist
+          if [ "${{ matrix.archive_ext }}" = "zip" ]; then
+            unzip -o "${{ matrix.archive }}"
+          else
+            tar -xzf "${{ matrix.archive }}"
+          fi
+          chmod +x "${{ matrix.binary }}"
+          test -x "${{ matrix.binary }}"
+
+      - name: --version prints the released semver and exits 0
+        shell: bash
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          output=$(dist/${{ matrix.binary }} --version)
+          echo "$output"
+          expected="${TAG#v}"
+          reported=$(printf '%s\n' "$output" | awk '{print $NF}')
+          if ! printf '%s\n' "$reported" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::--version did not print a semver, got: $output"
+            exit 1
+          fi
+          if [ "$reported" != "$expected" ]; then
+            echo "::error::--version printed $reported but the release is $expected"
+            exit 1
+          fi
+
+      - name: --help exits 0
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist/${{ matrix.binary }} --help > /dev/null

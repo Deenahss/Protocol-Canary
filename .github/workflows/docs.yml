@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - "docs-site/**"
+      - "viewer/**"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
       - "docs-site/**"
+      - "viewer/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -29,6 +31,18 @@ jobs:
         run: |
           curl -sL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
             | tar xz -C /usr/local/bin
+
+      # D-08b: the viewer is published beside the book at /viewer/. The
+      # copy goes into docs-site/src/viewer/ before the build, so mdbook
+      # transports the directory verbatim into book/viewer/ and the
+      # sidebar link resolves through the link check below. The viewer
+      # keeps its relative asset paths and CSP meta tag; nothing here
+      # rewrites viewer files.
+      - name: Bundle report viewer
+        run: |
+          rm -rf docs-site/src/viewer
+          cp -a viewer docs-site/src/viewer
+          test -f docs-site/src/viewer/index.html
 
       - name: Build book
         working-directory: docs-site
