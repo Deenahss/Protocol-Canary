@@ -15,7 +15,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::manifest::{
-    parse_cargo_manifest, parse_npm_workspace_member_dependencies, parse_npm_workspace_patterns,
+    parse_cargo_manifest, parse_npm_workspace_patterns, parse_pnpm_workspace_patterns,
+    parse_workspace_package_json_dependencies, NpmWorkspaceParseError, PnpmWorkspaceParseError,
     ProjectManifest,
 };
 
@@ -55,6 +56,7 @@ pub enum DiagnosticCode {
     UnsupportedSyntax,
     WorkspaceMemberMissing,
     PathOutsideRoot,
+    OverrideNotice,
 }
 
 impl DiagnosticCode {
@@ -68,6 +70,7 @@ impl DiagnosticCode {
             DiagnosticCode::UnsupportedSyntax => "unsupported-syntax",
             DiagnosticCode::WorkspaceMemberMissing => "workspace-member-missing",
             DiagnosticCode::PathOutsideRoot => "path-outside-root",
+            DiagnosticCode::OverrideNotice => "override-notice",
         }
     }
 }
@@ -149,6 +152,7 @@ pub fn scan_cargo_workspace(root: &Path) -> WorkspaceScan {
             &mut found,
             &mut scan.diagnostics,
             &mut budget,
+            true,
         );
     }
 
@@ -176,10 +180,124 @@ pub fn scan_cargo_workspace(root: &Path) -> WorkspaceScan {
     scan
 }
 
-/// Discovers npm workspace members from the root `package.json`.
+/// Discovers pnpm workspace members from `pnpm-workspace.yaml` using CF-07 bounds.
+pub fn scan_pnpm_workspace(root: &Path) -> WorkspaceScan {
+    scan_pnpm_workspace_with_limit(root, MAX_WORKSPACE_MEMBERS)
+}
+
+pub(crate) fn scan_pnpm_workspace_with_limit(root: &Path, member_limit: usize) -> WorkspaceScan {
+    let mut scan = WorkspaceScan::default();
+    let manifest_path = root.join("pnpm-workspace.yaml");
+    let metadata = match std::fs::symlink_metadata(&manifest_path) {
+        Ok(metadata) => metadata,
+        Err(_) => return scan,
+    };
+    if metadata.file_type().is_symlink() {
+        push(
+            &mut scan.diagnostics,
+            DiagnosticCode::SymlinkSkipped,
+            "pnpm-workspace.yaml is a symbolic link and was not followed",
+        );
+        return scan;
+    }
+    if !metadata.is_file() {
+        return scan;
+    }
+    let raw = match read_limited(&manifest_path) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => {
+            push(
+                &mut scan.diagnostics,
+                DiagnosticCode::ManifestTooLarge,
+                format!("pnpm-workspace.yaml is larger than {MAX_MANIFEST_BYTES} bytes"),
+            );
+            return scan;
+        }
+        Err(error) => {
+            push(
+                &mut scan.diagnostics,
+                DiagnosticCode::ManifestUnparseable,
+                format!("pnpm-workspace.yaml could not be read: {error}"),
+            );
+            return scan;
+        }
+    };
+    let patterns = match parse_pnpm_workspace_patterns(&raw) {
+        Ok(patterns) => patterns,
+        Err(PnpmWorkspaceParseError::InvalidYaml) => {
+            push(
+                &mut scan.diagnostics,
+                DiagnosticCode::ManifestUnparseable,
+                "pnpm-workspace.yaml is not valid YAML",
+            );
+            return scan;
+        }
+        Err(PnpmWorkspaceParseError::Unsupported) => {
+            push(
+                &mut scan.diagnostics,
+                DiagnosticCode::UnsupportedSyntax,
+                "pnpm-workspace.yaml must contain only a top-level packages list of strings",
+            );
+            return scan;
+        }
+    };
+
+    let mut budget = Budget::default();
+    let mut included = BTreeSet::new();
+    let mut excluded = BTreeSet::new();
+    for pattern in &patterns {
+        if let Some(pattern) = pattern.strip_prefix('!') {
+            if pattern.is_empty() {
+                push(
+                    &mut scan.diagnostics,
+                    DiagnosticCode::UnsupportedSyntax,
+                    "pnpm workspace exclusion pattern cannot be empty",
+                );
+                continue;
+            }
+            expand_pattern(
+                root,
+                pattern,
+                &mut excluded,
+                &mut scan.diagnostics,
+                &mut budget,
+                false,
+            );
+        } else {
+            expand_pattern(
+                root,
+                pattern,
+                &mut included,
+                &mut scan.diagnostics,
+                &mut budget,
+                true,
+            );
+        }
+    }
+    included.retain(|member| !excluded.contains(member));
+    let total = included.len();
+    for member in included.into_iter().take(member_limit) {
+        read_package_member(root, &member, &mut scan);
+    }
+    if total > member_limit {
+        scan.diagnostics.push(Diagnostic {
+            code: DiagnosticCode::ScanBoundReached,
+            detail: format!(
+                "workspace members limit {member_limit} ({total} found); the rest were not scanned"
+            ),
+        });
+    }
+    scan
+}
+
+/// Discovers npm workspace members from the root `package.json` `workspaces`
+/// field, using the same CF-07 bounds as the other scanners.
 ///
-/// Only local member directories are inspected. The same depth, count,
-/// directory-name, and symlink rules as Cargo workspace scanning apply.
+/// The `workspaces` field may be an array of glob strings or an object with
+/// a `packages` array; anything else is reported as [`DiagnosticCode::UnsupportedSyntax`].
+/// npm defines no exclusion syntax, so negation-free patterns are the whole
+/// vocabulary. A root without `package.json`, or without a `workspaces`
+/// field, is an empty scan rather than an error — like the other scanners.
 pub fn scan_npm_workspace(root: &Path) -> WorkspaceScan {
     scan_npm_workspace_with_limit(root, MAX_WORKSPACE_MEMBERS)
 }
@@ -222,17 +340,27 @@ pub(crate) fn scan_npm_workspace_with_limit(root: &Path, member_limit: usize) ->
         }
     };
     let patterns = match parse_npm_workspace_patterns(&raw) {
-        Ok(Some(patterns)) => patterns,
-        Ok(None) => return scan,
-        Err(()) => {
+        Ok(patterns) => patterns,
+        Err(NpmWorkspaceParseError::InvalidJson) => {
             push(
                 &mut scan.diagnostics,
                 DiagnosticCode::ManifestUnparseable,
-                "package.json has invalid npm workspace configuration",
+                "package.json is not valid JSON",
+            );
+            return scan;
+        }
+        Err(NpmWorkspaceParseError::Unsupported) => {
+            push(
+                &mut scan.diagnostics,
+                DiagnosticCode::UnsupportedSyntax,
+                "package.json workspaces must be an array of strings or an object with a packages array of strings",
             );
             return scan;
         }
     };
+    if patterns.is_empty() {
+        return scan;
+    }
 
     let mut budget = Budget::default();
     let mut found = BTreeSet::new();
@@ -243,11 +371,12 @@ pub(crate) fn scan_npm_workspace_with_limit(root: &Path, member_limit: usize) ->
             &mut found,
             &mut scan.diagnostics,
             &mut budget,
+            true,
         );
     }
     let total = found.len();
     for member in found.into_iter().take(member_limit) {
-        read_npm_member(root, &member, &mut scan);
+        read_package_member(root, &member, &mut scan);
     }
     if total > member_limit {
         scan.diagnostics.push(Diagnostic {
@@ -351,6 +480,7 @@ fn expand_pattern(
     found: &mut BTreeSet<String>,
     diagnostics: &mut Vec<Diagnostic>,
     budget: &mut Budget,
+    report_missing: bool,
 ) {
     if pattern.is_empty()
         || pattern.starts_with('/')
@@ -399,15 +529,23 @@ fn expand_pattern(
     let before = found.len();
     expand_segments(root, "", &segments, found, diagnostics, budget);
     let literal = !segments.iter().any(|s| has_wildcard(s));
-    if literal && found.len() == before && !budget.reported {
-        // Reported only when nothing else (a skipped link) explains it.
-        let already = diagnostics.iter().any(|d| d.detail.contains(pattern));
-        if !already {
-            push(
-                diagnostics,
-                DiagnosticCode::WorkspaceMemberMissing,
-                format!("workspace member {pattern:?} is not a directory"),
-            );
+    if report_missing && literal && found.len() == before && !budget.reported {
+        // Reported only when the pattern's own directory is missing or
+        // unusable — not when it matched but was already found by an
+        // earlier pattern, and not when a symlink diagnostic already
+        // explains the empty result.
+        match directory_kind(root, &segments.join("/")) {
+            DirKind::Directory | DirKind::Link => {}
+            DirKind::Other => {
+                let already = diagnostics.iter().any(|d| d.detail.contains(pattern));
+                if !already {
+                    push(
+                        diagnostics,
+                        DiagnosticCode::WorkspaceMemberMissing,
+                        format!("workspace member {pattern:?} is not a directory"),
+                    );
+                }
+            }
         }
     }
 }
@@ -549,21 +687,21 @@ fn read_member(root: &Path, member: &str, scan: &mut WorkspaceScan) {
     }
 }
 
-fn read_npm_member(root: &Path, member: &str, scan: &mut WorkspaceScan) {
+fn read_package_member(root: &Path, member: &str, scan: &mut WorkspaceScan) {
     let manifest_relative = format!("{member}/package.json");
     let manifest_path = to_path(root, &manifest_relative);
     match read_limited(&manifest_path) {
         Err(_) => push(
             &mut scan.diagnostics,
             DiagnosticCode::WorkspaceMemberMissing,
-            format!("npm workspace member {member:?} has no readable package.json"),
+            format!("workspace member {member:?} has no readable package.json"),
         ),
         Ok(None) => push(
             &mut scan.diagnostics,
             DiagnosticCode::ManifestTooLarge,
             format!("{manifest_relative} is larger than {MAX_MANIFEST_BYTES} bytes"),
         ),
-        Ok(Some(text)) => match parse_npm_workspace_member_dependencies(&text) {
+        Ok(Some(text)) => match parse_workspace_package_json_dependencies(&text) {
             Some(dependencies) => {
                 let mut dependency_names: Vec<String> = dependencies
                     .into_iter()
@@ -603,21 +741,66 @@ mod tests {
     }
 
     #[test]
+    fn pnpm_yaml_parser_ignores_comments_and_requires_a_packages_list() {
+        assert_eq!(
+            parse_pnpm_workspace_patterns(
+                "packages:\n  - 'packages/*' # package sources\n  - '!packages/ignored'\n"
+            ),
+            Ok(vec![
+                "packages/*".to_string(),
+                "!packages/ignored".to_string()
+            ])
+        );
+        assert_eq!(
+            parse_pnpm_workspace_patterns("packages: packages/*\n"),
+            Err(PnpmWorkspaceParseError::Unsupported)
+        );
+        assert_eq!(
+            parse_pnpm_workspace_patterns("packages: [\n"),
+            Err(PnpmWorkspaceParseError::InvalidYaml)
+        );
+    }
+
+    #[test]
+    fn npm_json_parser_accepts_both_workspaces_spellings() {
+        assert_eq!(
+            parse_npm_workspace_patterns(r#"{"workspaces": ["packages/*", "apps/*"]}"#),
+            Ok(vec!["packages/*".to_string(), "apps/*".to_string()])
+        );
+        assert_eq!(
+            parse_npm_workspace_patterns(
+                r#"{"private": true, "workspaces": {"packages": ["contracts/*"], "nohoist": ["x"]}}"#
+            ),
+            Ok(vec!["contracts/*".to_string()])
+        );
+        // No workspaces field is an empty scan, not an error.
+        assert_eq!(
+            parse_npm_workspace_patterns(r#"{"name": "root", "version": "1.0.0"}"#),
+            Ok(Vec::new())
+        );
+        // Unsupported shapes.
+        assert_eq!(
+            parse_npm_workspace_patterns(r#"{"workspaces": "packages/*"}"#),
+            Err(NpmWorkspaceParseError::Unsupported)
+        );
+        assert_eq!(
+            parse_npm_workspace_patterns(r#"{"workspaces": {"nohoist": ["x"]}}"#),
+            Err(NpmWorkspaceParseError::Unsupported)
+        );
+        assert_eq!(
+            parse_npm_workspace_patterns(r#"{"workspaces": [1, 2]}"#),
+            Err(NpmWorkspaceParseError::Unsupported)
+        );
+        assert_eq!(
+            parse_npm_workspace_patterns("{"),
+            Err(NpmWorkspaceParseError::InvalidJson)
+        );
+    }
+
+    #[test]
     fn a_star_never_crosses_a_path_separator() {
         assert!(match_path(&["crates", "*"], &["crates", "a"]));
         assert!(!match_path(&["crates", "*"], &["crates", "a", "b"]));
         assert!(!match_path(&["*"], &["crates", "a"]));
-    }
-
-    #[test]
-    fn npm_workspace_patterns_accept_both_standard_forms() {
-        assert_eq!(
-            parse_npm_workspace_patterns(r#"{"workspaces":["packages/*"]}"#),
-            Ok(Some(vec!["packages/*".to_string()]))
-        );
-        assert_eq!(
-            parse_npm_workspace_patterns(r#"{"workspaces":{"packages":["packages/*","tools/*"]}}"#),
-            Ok(Some(vec!["packages/*".to_string(), "tools/*".to_string()]))
-        );
     }
 }

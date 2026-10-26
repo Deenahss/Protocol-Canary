@@ -41,6 +41,21 @@ impl fmt::Display for Surface {
     }
 }
 
+impl std::str::FromStr for Surface {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "xdr" => Ok(Surface::Xdr),
+            "rpc" => Ok(Surface::Rpc),
+            "soroban" => Ok(Surface::Soroban),
+            other => Err(format!(
+                "unknown surface {other:?}: expected 'xdr', 'rpc', or 'soroban'"
+            )),
+        }
+    }
+}
+
 /// The outcome of running a single compatibility test.
 ///
 /// `Fail` means the compatibility assertion ran and failed; `Error` means
@@ -194,6 +209,12 @@ pub enum Capability {
 }
 
 impl Capability {
+    /// Alias for [`Capability::StellarSdkDependency`] representing Python SDK detection.
+    #[allow(non_upper_case_globals)]
+    pub const PythonSdk: Capability = Capability::StellarSdkDependency;
+    /// Constant alias for Python SDK capability.
+    pub const PYTHON_SDK: Capability = Capability::StellarSdkDependency;
+
     /// Every capability variant the engine can declare, in declaration order.
     ///
     /// This is the engine side of the capability vocabulary shared with the
