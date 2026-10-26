@@ -16,7 +16,18 @@ fn help_lists_every_subcommand() {
     let output = run_in(&dir.path, &["--help"]);
     assert!(output.status.success());
     let text = stdout(&output);
-    for subcommand in ["check", "inspect", "fixtures", "report", "version"] {
+    for subcommand in [
+        "check",
+        "inspect",
+        "fixtures",
+        "report",
+        "diff",
+        "cache",
+        "config",
+        "lock",
+        "completions",
+        "version",
+    ] {
         assert!(
             text.contains(subcommand),
             "--help should mention {subcommand:?}:\n{text}"

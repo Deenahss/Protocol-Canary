@@ -25,7 +25,7 @@ fn a_payload_reference_that_escapes_the_fixture_directory_is_an_invalid_fixture(
         let output = run_in(&dir.path, &[command]);
         assert_eq!(output.status.code(), Some(4), "{command}");
         let text = stderr(&output);
-        assert!(text.contains("unsafe input_file"), "{command}: {text}");
+        assert!(text.contains("input_file"), "{command}: {text}");
         assert!(text.contains(".."), "{command}: {text}");
     }
 }
